@@ -53,7 +53,9 @@ public class DashboardView {
     private final Button retryFailedButton = new Button("Reintentar fallidos");
     private WebSocket webSocket;
     private WatchService watchService;
-    private final ExecutorService watcherExecutor = Executors.newSingleThreadExecutor();
+    // El escaneo inicial y el watcher deben poder correr en paralelo.
+    // Con un solo hilo, el watchLoop quedaba bloqueado hasta que terminaba el árbol completo.
+    private final ExecutorService watcherExecutor = Executors.newFixedThreadPool(2);
     private final ScheduledExecutorService uploadExecutor = Executors.newSingleThreadScheduledExecutor();
     private final Semaphore uploadSlots = new Semaphore(3);
     private final AtomicInteger activeUploads = new AtomicInteger(0);
