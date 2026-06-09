@@ -1,0 +1,40 @@
+{
+  "name": "tyrakbox-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cliente de escritorio de Tyrak Box para Windows.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "electron-store": "^9.0.0",
+    "png-to-ico": "^3.0.1"
+  },
+  "devDependencies": {
+    "electron": "^32.2.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.tyrak.box.desktop",
+    "productName": "Tyrak Box",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "src/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

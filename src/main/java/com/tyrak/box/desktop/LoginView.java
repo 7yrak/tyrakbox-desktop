@@ -1,0 +1,92 @@
+package com.tyrak.box.desktop;
+
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.Parent;
+import javafx.scene.control.*;
+import javafx.scene.layout.*;
+
+public class LoginView {
+    private final AppState state;
+    private final ApiClient apiClient = new ApiClient();
+    private final VBox root = new VBox(12);
+
+    public LoginView(AppState state) {
+        this.state = state;
+        build();
+    }
+
+    public Parent getRoot() {
+        return root;
+    }
+
+    private void build() {
+        root.getStyleClass().add("login-root");
+        root.setAlignment(Pos.CENTER);
+        root.setPadding(new Insets(28));
+
+        VBox card = new VBox(14);
+        card.getStyleClass().add("glass-card");
+        card.setMaxWidth(420);
+        card.setPadding(new Insets(24));
+
+        Label title = new Label("Tyrak Box Desktop");
+        title.getStyleClass().add("title");
+
+        TextField serverUrl = new TextField(state.getServerUrl());
+        serverUrl.setPromptText("Servidor, por ejemplo http://localhost:8084");
+
+        TextField username = new TextField();
+        username.setPromptText("Usuario");
+
+        PasswordField password = new PasswordField();
+        password.setPromptText("Contraseña");
+
+        Button login = new Button("Ingresar");
+        login.getStyleClass().add("primary-button");
+        Label status = new Label("Conéctate a tu servidor local o remoto.");
+
+        login.setOnAction(evt -> {
+            login.setDisable(true);
+            status.setText("Validando sesión...");
+            state.setServerUrl(serverUrl.getText().trim());
+            try {
+                ApiClient.AuthResult result = apiClient.login(state.getServerUrl(), username.getText().trim(), password.getText());
+                state.setToken(result.token);
+                state.setUsername(result.username);
+                state.setUserId(result.userId);
+                if (DashboardView.hasSavedSession()) {
+                    Alert prompt = new Alert(Alert.AlertType.CONFIRMATION);
+                    prompt.setTitle("Sesión guardada");
+                    prompt.setHeaderText("Se detectó una carpeta de sincronización guardada");
+                    prompt.setContentText("¿Quieres retomarla o empezar una nueva?");
+                    ButtonType resume = new ButtonType("Retomar");
+                    ButtonType fresh = new ButtonType("Nueva");
+                    prompt.getButtonTypes().setAll(resume, fresh, ButtonType.CANCEL);
+                    var choice = prompt.showAndWait();
+                    if (choice.isPresent() && choice.get() == resume) {
+                        String savedFolder = DashboardView.getSavedSyncFolder();
+                        if (savedFolder != null) {
+                            state.setSyncFolder(savedFolder);
+                            state.setResumeToken(savedFolder);
+                        }
+                    } else if (choice.isPresent() && choice.get() == fresh) {
+                        DashboardView.clearSavedSession();
+                        state.setSyncFolder(null);
+                        state.setResumeToken(null);
+                    }
+                }
+
+                DashboardView dashboard = new DashboardView(state);
+                root.getScene().setRoot(dashboard.getRoot());
+            } catch (Exception e) {
+                status.setText(e.getMessage());
+            } finally {
+                login.setDisable(false);
+            }
+        });
+
+        card.getChildren().addAll(title, new Label("Servidor"), serverUrl, new Label("Usuario"), username, new Label("Contraseña"), password, login, status);
+        root.getChildren().add(card);
+    }
+}

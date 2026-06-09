@@ -1,0 +1,39 @@
+.root {
+    -fx-font-family: "Segoe UI", "Liberation Sans", sans-serif;
+    -fx-background-color: linear-gradient(to bottom right, #eef4ff, #f7faff);
+}
+.glass-card {
+    -fx-background-color: rgba(255,255,255,0.82);
+    -fx-background-radius: 20;
+    -fx-border-radius: 20;
+    -fx-border-color: rgba(15,23,42,0.08);
+    -fx-border-width: 1;
+    -fx-effect: dropshadow(gaussian, rgba(15,23,42,0.12), 20, 0.15, 0, 8);
+}
+.title {
+    -fx-font-size: 22px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #0f172a;
+}
+.panel-title {
+    -fx-font-size: 16px;
+    -fx-font-weight: bold;
+}
+.sync-status {
+    -fx-font-size: 18px;
+    -fx-font-weight: bold;
+    -fx-text-fill: #0f766e;
+}
+.sync-message, .sync-task {
+    -fx-text-fill: #334155;
+}
+.primary-button {
+    -fx-background-color: #0ea5e9;
+    -fx-text-fill: white;
+    -fx-background-radius: 12;
+}
+.secondary-button {
+    -fx-background-color: #e2e8f0;
+    -fx-text-fill: #0f172a;
+    -fx-background-radius: 12;
+}
