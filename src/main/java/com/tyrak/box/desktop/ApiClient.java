@@ -103,6 +103,33 @@ public class ApiClient {
         return safeRead(response.body());
     }
 
+    public JsonNode getUploadJob(String serverUrl, String token, String jobId) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(serverUrl.replaceAll("/$", "") + "/api/files/upload-jobs/" + jobId))
+                .header("Authorization", "Bearer " + token)
+                .GET()
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() / 100 != 2) {
+            throw new IllegalStateException(response.body());
+        }
+        return mapper.readTree(response.body());
+    }
+
+    public JsonNode getFolderContent(String serverUrl, String token, String parentId) throws Exception {
+        String uri = serverUrl.replaceAll("/$", "") + "/api/folders/content" + (parentId != null && !parentId.isBlank() ? "?parentId=" + parentId : "");
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(uri))
+                .header("Authorization", "Bearer " + token)
+                .GET()
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() / 100 != 2) {
+            throw new IllegalStateException(response.body());
+        }
+        return mapper.readTree(response.body());
+    }
+
     public void deleteFile(String serverUrl, String token, String fileId) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(serverUrl.replaceAll("/$", "") + "/api/files/" + fileId))

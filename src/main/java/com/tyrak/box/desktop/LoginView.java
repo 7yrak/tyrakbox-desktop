@@ -2,9 +2,11 @@ package com.tyrak.box.desktop;
 
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
+import javafx.application.Platform;
 import javafx.scene.Parent;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
+import java.util.concurrent.CompletableFuture;
 
 public class LoginView {
     private final AppState state;
@@ -38,9 +40,11 @@ public class LoginView {
 
         TextField username = new TextField();
         username.setPromptText("Usuario");
+        username.setText("sergio");
 
         PasswordField password = new PasswordField();
         password.setPromptText("Contraseña");
+        password.setText("password123");
 
         Button login = new Button("Ingresar");
         login.getStyleClass().add("primary-button");
@@ -50,40 +54,51 @@ public class LoginView {
             login.setDisable(true);
             status.setText("Validando sesión...");
             state.setServerUrl(serverUrl.getText().trim());
-            try {
-                ApiClient.AuthResult result = apiClient.login(state.getServerUrl(), username.getText().trim(), password.getText());
-                state.setToken(result.token);
-                state.setUsername(result.username);
-                state.setUserId(result.userId);
-                if (DashboardView.hasSavedSession()) {
-                    Alert prompt = new Alert(Alert.AlertType.CONFIRMATION);
-                    prompt.setTitle("Sesión guardada");
-                    prompt.setHeaderText("Se detectó una carpeta de sincronización guardada");
-                    prompt.setContentText("¿Quieres retomarla o empezar una nueva?");
-                    ButtonType resume = new ButtonType("Retomar");
-                    ButtonType fresh = new ButtonType("Nueva");
-                    prompt.getButtonTypes().setAll(resume, fresh, ButtonType.CANCEL);
-                    var choice = prompt.showAndWait();
-                    if (choice.isPresent() && choice.get() == resume) {
-                        String savedFolder = DashboardView.getSavedSyncFolder();
-                        if (savedFolder != null) {
-                            state.setSyncFolder(savedFolder);
-                            state.setResumeToken(savedFolder);
-                        }
-                    } else if (choice.isPresent() && choice.get() == fresh) {
-                        DashboardView.clearSavedSession();
-                        state.setSyncFolder(null);
-                        state.setResumeToken(null);
-                    }
+            CompletableFuture.supplyAsync(() -> {
+                try {
+                    return apiClient.login(state.getServerUrl(), username.getText().trim(), password.getText());
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
                 }
+            }).whenComplete((result, throwable) -> Platform.runLater(() -> {
+                try {
+                    if (throwable != null) {
+                        Throwable rootCause = throwable.getCause() != null ? throwable.getCause() : throwable;
+                        status.setText(rootCause.getMessage());
+                        return;
+                    }
 
-                DashboardView dashboard = new DashboardView(state);
-                root.getScene().setRoot(dashboard.getRoot());
-            } catch (Exception e) {
-                status.setText(e.getMessage());
-            } finally {
-                login.setDisable(false);
-            }
+                    state.setToken(result.token);
+                    state.setUsername(result.username);
+                    state.setUserId(result.userId);
+                    if (DashboardView.hasSavedSession()) {
+                        Alert prompt = new Alert(Alert.AlertType.CONFIRMATION);
+                        prompt.setTitle("Sesión guardada");
+                        prompt.setHeaderText("Se detectó una carpeta de sincronización guardada");
+                        prompt.setContentText("¿Quieres retomarla o empezar una nueva?");
+                        ButtonType resume = new ButtonType("Retomar");
+                        ButtonType fresh = new ButtonType("Nueva");
+                        prompt.getButtonTypes().setAll(resume, fresh, ButtonType.CANCEL);
+                        var choice = prompt.showAndWait();
+                        if (choice.isPresent() && choice.get() == resume) {
+                            String savedFolder = DashboardView.getSavedSyncFolder();
+                            if (savedFolder != null) {
+                                state.setSyncFolder(savedFolder);
+                                state.setResumeToken(savedFolder);
+                            }
+                        } else if (choice.isPresent() && choice.get() == fresh) {
+                            DashboardView.clearSavedSession();
+                            state.setSyncFolder(null);
+                            state.setResumeToken(null);
+                        }
+                    }
+
+                    DashboardView dashboard = new DashboardView(state);
+                    root.getScene().setRoot(dashboard.getRoot());
+                } finally {
+                    login.setDisable(false);
+                }
+            }));
         });
 
         card.getChildren().addAll(title, new Label("Servidor"), serverUrl, new Label("Usuario"), username, new Label("Contraseña"), password, login, status);

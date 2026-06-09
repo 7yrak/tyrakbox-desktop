@@ -1,0 +1,9 @@
+com\tyrak\box\desktop\DesktopApp.class
+com\tyrak\box\desktop\DashboardView$RefreshSnapshot.class
+com\tyrak\box\desktop\DashboardView.class
+com\tyrak\box\desktop\ApiClient$AuthResult.class
+com\tyrak\box\desktop\DashboardView$2.class
+com\tyrak\box\desktop\AppState.class
+com\tyrak\box\desktop\DashboardView$1.class
+com\tyrak\box\desktop\LoginView.class
+com\tyrak\box\desktop\ApiClient.class

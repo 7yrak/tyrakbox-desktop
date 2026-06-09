@@ -28,6 +28,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.CompletionStage;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class DashboardView {
@@ -42,6 +43,7 @@ public class DashboardView {
     private final ProgressBar uploadProgressBar = new ProgressBar(0);
     private final Label uploadStats = new Label("Archivos: 0/0");
     private final Label currentUploadLabel = new Label("Archivo actual: -");
+    private final Label lastUploadLabel = new Label("Última subida exitosa: -");
     private final Label completionLabel = new Label("Estado: Listo para iniciar");
     private final ListView<String> activityList = new ListView<>();
     private final ListView<String> filesList = new ListView<>();
@@ -65,21 +67,36 @@ public class DashboardView {
     private final Map<String, String> uploadedSignatures = new ConcurrentHashMap<>();
     private final Set<String> failedUploads = ConcurrentHashMap.newKeySet();
     private final Map<String, String> remoteFolderIds = new ConcurrentHashMap<>();
+    private final Set<String> remoteFilePaths = ConcurrentHashMap.newKeySet();
+    private final ExecutorService bootstrapExecutor = Executors.newSingleThreadExecutor();
     private volatile String remoteRootFolderId;
     private volatile int totalFilesToUpload = 0;
+    private volatile int scannedFiles = 0;
     private volatile int completedFiles = 0;
     private volatile int failedFiles = 0;
+    private volatile long totalBytesToUpload = 0L;
+    private volatile long completedBytes = 0L;
+    private volatile long currentUploadBytes = 0L;
+    private volatile long currentUploadStartedAt = 0L;
+    private volatile String lastSuccessfulUpload = "-";
+    private volatile long syncStartedAt = 0L;
+    private volatile long lastCompletedAt = 0L;
     private volatile boolean scanning = false;
     private volatile boolean paused = false;
+    private final AtomicBoolean uploadStatsUpdateQueued = new AtomicBoolean(false);
     private static final int MAX_UPLOAD_ATTEMPTS = 3;
 
     public DashboardView(AppState state) {
         this.state = state;
         build();
+        bootstrapExecutor.submit(this::initializeAsync);
+    }
+
+    private void initializeAsync() {
         refreshAll();
         connectSocket();
         if (state.getSyncFolder() != null && !state.getSyncFolder().isBlank()) {
-            Platform.runLater(() -> startFolderSync(Path.of(state.getSyncFolder())));
+            startFolderSync(Path.of(state.getSyncFolder()));
         }
     }
 
@@ -149,6 +166,7 @@ public class DashboardView {
         uploadProgressBar.setPrefWidth(520);
         uploadStats.getStyleClass().add("sync-message");
         currentUploadLabel.getStyleClass().add("sync-message");
+        lastUploadLabel.getStyleClass().add("sync-message");
         syncCard.getChildren().addAll(
                 new Label("Estado de sync"),
                 syncStatus,
@@ -160,6 +178,7 @@ public class DashboardView {
                 uploadStats,
                 uploadProgressBar,
                 currentUploadLabel,
+                lastUploadLabel,
                 new Separator(),
                 syncButton,
                 changeFolderButton,
@@ -195,34 +214,48 @@ public class DashboardView {
     }
 
     private void refreshAll() {
+        bootstrapExecutor.submit(this::refreshAllInternal);
+    }
+
+    private void refreshAllInternal() {
         try {
             JsonNode status = apiClient.getSyncStatus(state.getServerUrl(), state.getToken());
-            syncStatus.setText((status.path("running").asBoolean(false) ? "Activa" : "Detenida") + " | " + status.path("syncUsername").asText(state.getUsername()));
-            syncTask.setText(status.path("currentTask").asText(""));
-            syncMessage.setText(status.path("lastEvent").asText("Sin actividad"));
-            syncMessage.setWrapText(true);
-            syncMessage.setText(status.path("lastError").asText("").isBlank() ? status.path("lastEvent").asText("Sin actividad") : status.path("lastError").asText());
-            progressBar.setProgress(status.path("currentTaskProgress").asInt(0) / 100.0);
-
-            activityList.setItems(FXCollections.observableArrayList());
-            if (status.has("recentEvents") && status.get("recentEvents").isArray()) {
-                var items = FXCollections.<String>observableArrayList();
-                status.get("recentEvents").forEach(node -> items.add(node.asText()));
-                activityList.setItems(items);
-            }
-
             JsonNode content = apiClient.getRootContent(state.getServerUrl(), state.getToken());
-            var items = FXCollections.<String>observableArrayList();
-            if (content.has("folders")) {
-                content.get("folders").forEach(node -> items.add("📁 " + node.path("name").asText("Carpeta")));
-            }
-            if (content.has("files")) {
-                content.get("files").forEach(node -> items.add("📄 " + node.path("name").asText("Archivo")));
-            }
-            filesList.setItems(items);
+            Platform.runLater(() -> applyRefreshSnapshot(new RefreshSnapshot(status, content, null)));
         } catch (Exception e) {
-            syncMessage.setText("Error actualizando: " + e.getMessage());
+            Platform.runLater(() -> applyRefreshSnapshot(new RefreshSnapshot(null, null, e.getMessage())));
         }
+    }
+
+    private void applyRefreshSnapshot(RefreshSnapshot snapshot) {
+        if (snapshot.errorMessage != null) {
+            syncMessage.setText("Error actualizando: " + snapshot.errorMessage);
+            return;
+        }
+
+        JsonNode status = snapshot.status;
+        JsonNode content = snapshot.content;
+        syncStatus.setText((status.path("running").asBoolean(false) ? "Activa" : "Detenida") + " | " + status.path("syncUsername").asText(state.getUsername()));
+        syncTask.setText(status.path("currentTask").asText(""));
+        syncMessage.setWrapText(true);
+        syncMessage.setText(status.path("lastError").asText("").isBlank() ? status.path("lastEvent").asText("Sin actividad") : status.path("lastError").asText());
+        progressBar.setProgress(status.path("currentTaskProgress").asInt(0) / 100.0);
+
+        activityList.setItems(FXCollections.observableArrayList());
+        if (status.has("recentEvents") && status.get("recentEvents").isArray()) {
+            var items = FXCollections.<String>observableArrayList();
+            status.get("recentEvents").forEach(node -> items.add(node.asText()));
+            activityList.setItems(items);
+        }
+
+        var items = FXCollections.<String>observableArrayList();
+        if (content.has("folders")) {
+            content.get("folders").forEach(node -> items.add("📁 " + node.path("name").asText("Carpeta")));
+        }
+        if (content.has("files")) {
+            content.get("files").forEach(node -> items.add("📄 " + node.path("name").asText("Archivo")));
+        }
+        filesList.setItems(items);
     }
 
     private void chooseSyncFolder() {
@@ -259,7 +292,7 @@ public class DashboardView {
         }
 
         saveQueueState();
-        stopFolderSync();
+        stopFolderSync(true);
         state.setResumeToken(state.getSyncFolder());
         state.setSyncFolder(null);
         Platform.runLater(() -> {
@@ -275,8 +308,12 @@ public class DashboardView {
     }
 
     private void startFolderSync(Path folder) {
-        stopFolderSync();
-        syncMessage.setText("Preparando sincronización local...");
+        bootstrapExecutor.submit(() -> startFolderSyncInternal(folder));
+    }
+
+    private void startFolderSyncInternal(Path folder) {
+        stopFolderSync(false);
+        Platform.runLater(() -> syncMessage.setText("Preparando sincronización local..."));
         try {
             resetUploadProgress();
             watchService = FileSystems.getDefault().newWatchService();
@@ -287,14 +324,16 @@ public class DashboardView {
             restoreQueueStateIfPossible(folder);
             watcherExecutor.submit(() -> scanAndUpload(folder));
             watcherExecutor.submit(() -> watchLoop(folder));
-            syncMessage.setText("Sincronizando: " + folder);
-            syncStatus.setText("Sync local activa");
+            Platform.runLater(() -> {
+                syncMessage.setText("Sincronizando: " + folder);
+                syncStatus.setText("Sync local activa");
+            });
         } catch (Exception e) {
-            syncMessage.setText("No se pudo iniciar sync local: " + e.getMessage());
+            Platform.runLater(() -> syncMessage.setText("No se pudo iniciar sync local: " + e.getMessage()));
         }
     }
 
-    private void stopFolderSync() {
+    private void stopFolderSync(boolean persistQueueState) {
         if (watchService != null) {
             try {
                 watchService.close();
@@ -312,7 +351,9 @@ public class DashboardView {
         scanning = false;
         paused = false;
         Platform.runLater(() -> pauseResumeButton.setText("Pausar cola"));
-        saveQueueState();
+        if (persistQueueState) {
+            saveQueueState();
+        }
         updateFolderControls();
     }
 
@@ -386,6 +427,8 @@ public class DashboardView {
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
                     totalFilesToUpload++;
+                    scannedFiles++;
+                    totalBytesToUpload += safeFileSize(file);
                     updateUploadStats();
                     queueUpload(rootFolder, file);
                     return FileVisitResult.CONTINUE;
@@ -394,6 +437,8 @@ public class DashboardView {
                 @Override
                 public FileVisitResult visitFileFailed(Path file, IOException exc) {
                     totalFilesToUpload++;
+                    scannedFiles++;
+                    totalBytesToUpload += safeFileSize(file);
                     failedFiles++;
                     updateUploadStats();
                     Platform.runLater(() -> syncMessage.setText("No se pudo leer: " + file.getFileName()));
@@ -410,11 +455,77 @@ public class DashboardView {
 
     private void ensureRemoteFolderTree(Path rootFolder) throws Exception {
         remoteFolderIds.clear();
+        remoteFilePaths.clear();
         java.io.File fileName = rootFolder.toFile();
         String rootName = fileName.getName();
-        JsonNode rootFolderNode = apiClient.createFolder(state.getServerUrl(), state.getToken(), rootName, null);
-        remoteRootFolderId = rootFolderNode.path("id").asText();
+        String existingRootId = remoteRootFolderId;
+        if (existingRootId == null || existingRootId.isBlank()) {
+            existingRootId = findRemoteRootFolderId(rootName);
+        }
+        if (existingRootId == null || existingRootId.isBlank()) {
+            JsonNode rootFolderNode = apiClient.createFolder(state.getServerUrl(), state.getToken(), rootName, null);
+            existingRootId = rootFolderNode.path("id").asText();
+        }
+        remoteRootFolderId = existingRootId;
         remoteFolderIds.put("", remoteRootFolderId);
+        refreshRemoteIndex(remoteRootFolderId);
+    }
+
+    private String findRemoteRootFolderId(String rootName) {
+        try {
+            JsonNode content = apiClient.getFolderContent(state.getServerUrl(), state.getToken(), null);
+            if (content.has("folders")) {
+                for (JsonNode folder : content.get("folders")) {
+                    if (rootName.equals(folder.path("name").asText(""))) {
+                        return folder.path("id").asText("");
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Platform.runLater(() -> syncMessage.setText("No se pudo buscar carpeta remota existente: " + e.getMessage()));
+        }
+        return null;
+    }
+
+    private void refreshRemoteIndex(String rootFolderId) {
+        try {
+            JsonNode content = apiClient.getFolderContent(state.getServerUrl(), state.getToken(), rootFolderId);
+            indexRemoteContent(content, "");
+        } catch (Exception e) {
+            Platform.runLater(() -> syncMessage.setText("No se pudo leer el índice remoto: " + e.getMessage()));
+        }
+    }
+
+    private void indexRemoteContent(JsonNode content, String prefix) {
+        if (content == null) {
+            return;
+        }
+
+        if (content.has("files")) {
+            content.get("files").forEach(file -> {
+                String name = file.path("name").asText("");
+                if (!name.isBlank()) {
+                    remoteFilePaths.add((prefix + name).replace("\\", "/"));
+                }
+            });
+        }
+
+        if (content.has("folders")) {
+            content.get("folders").forEach(folder -> {
+                String name = folder.path("name").asText("");
+                String id = folder.path("id").asText("");
+                if (name.isBlank()) {
+                    return;
+                }
+                String nextPrefix = prefix + name + "/";
+                try {
+                    JsonNode child = apiClient.getFolderContent(state.getServerUrl(), state.getToken(), id);
+                    indexRemoteContent(child, nextPrefix);
+                } catch (Exception e) {
+                    Platform.runLater(() -> syncMessage.setText("No se pudo leer carpeta remota: " + name));
+                }
+            });
+        }
     }
 
     private String ensureRemoteFolder(Path dir, Path rootFolder) throws Exception {
@@ -458,7 +569,12 @@ public class DashboardView {
         String relative = rootFolder.relativize(path).toString().replace("\\", "/");
         String signature = fileSignature(path);
         String previousSignature = uploadedSignatures.get(relative);
-        if (Boolean.TRUE.equals(uploadResults.get(relative)) && signature.equals(previousSignature)) {
+        boolean remoteHasFile = remoteFilePaths.contains(relative);
+        if ((remoteHasFile || signature.equals(previousSignature)) && !failedUploads.contains(relative)) {
+            uploadResults.put(relative, Boolean.TRUE);
+            uploadedSignatures.put(relative, signature);
+            completedFiles = (int) uploadResults.values().stream().filter(Boolean::booleanValue).count();
+            updateUploadStats();
             return;
         }
 
@@ -497,23 +613,35 @@ public class DashboardView {
             uploadSlots.acquire();
             acquired = true;
             activeUploads.incrementAndGet();
+            long fileSize = safeFileSize(path);
+            currentUploadBytes = fileSize;
+            currentUploadStartedAt = System.currentTimeMillis();
+            if (syncStartedAt == 0L) {
+                syncStartedAt = System.currentTimeMillis();
+            }
             waitIfPaused();
             ensureRemoteFolder(path.getParent(), rootFolder);
             String relative = rootFolder.relativize(path).toString().replace("\\", "/");
-            Platform.runLater(() -> currentUploadLabel.setText("Archivo actual: " + relative));
-            syncMessage.setText("Subiendo: " + relative);
+            Platform.runLater(() -> {
+                currentUploadLabel.setText("Archivo actual: " + relative);
+                syncMessage.setText("Subiendo: " + relative);
+            });
             apiClient.uploadFile(state.getServerUrl(), state.getToken(), path, relative, remoteRootFolderId);
             uploadResults.put(rootFolder.relativize(path).toString().replace("\\", "/"), Boolean.TRUE);
             uploadAttempts.remove(rootFolder.relativize(path).toString().replace("\\", "/"));
             uploadedSignatures.put(rootFolder.relativize(path).toString().replace("\\", "/"), fileSignature(path));
             failedUploads.remove(rootFolder.relativize(path).toString().replace("\\", "/"));
             completedFiles = (int) uploadResults.values().stream().filter(Boolean::booleanValue).count();
+            completedBytes += fileSize;
+            lastCompletedAt = System.currentTimeMillis();
             failedFiles = (int) uploadResults.values().stream().filter(v -> !v).count();
+            lastSuccessfulUpload = relative;
             updateUploadStats();
             saveQueueState();
             Platform.runLater(() -> {
                 activityList.getItems().add(0, "Subido: " + relative);
                 syncMessage.setText("Subido: " + relative);
+                currentUploadLabel.setText("Archivo actual: -");
             });
         } catch (Exception e) {
             String relativeKey = rootFolder.relativize(path).toString().replace("\\", "/");
@@ -533,6 +661,8 @@ public class DashboardView {
                 uploadSlots.release();
             }
             activeUploads.updateAndGet(v -> Math.max(0, v - 1));
+            currentUploadBytes = 0L;
+            currentUploadStartedAt = 0L;
             Platform.runLater(() -> currentUploadLabel.setText("Archivo actual: -"));
             updateUploadStats();
         }
@@ -590,38 +720,63 @@ public class DashboardView {
 
     private void resetUploadProgress() {
         totalFilesToUpload = 0;
+        scannedFiles = 0;
         completedFiles = 0;
         failedFiles = 0;
+        totalBytesToUpload = 0L;
+        completedBytes = 0L;
+        currentUploadBytes = 0L;
+        currentUploadStartedAt = 0L;
+        lastSuccessfulUpload = "-";
+        syncStartedAt = System.currentTimeMillis();
+        lastCompletedAt = 0L;
         uploadResults.clear();
-        uploadAttempts.clear();
-        failedUploads.clear();
         Platform.runLater(this::updateUploadStats);
     }
 
     private void updateUploadStats() {
+        if (Platform.isFxApplicationThread()) {
+            applyUploadStats();
+            return;
+        }
+
+        if (uploadStatsUpdateQueued.compareAndSet(false, true)) {
+            Platform.runLater(() -> {
+                try {
+                    applyUploadStats();
+                } finally {
+                    uploadStatsUpdateQueued.set(false);
+                }
+            });
+        }
+    }
+
+    private void applyUploadStats() {
         int completed = completedFiles;
         int total = totalFilesToUpload;
+        int scanned = scannedFiles;
         int failed = failedFiles;
         int inFlight = activeUploads.get();
-        int pending = Math.max(total - completed - failed - inFlight, 0);
-        double progress = total > 0 ? (double) completed / (double) total : 0.0;
+        long bytesTotal = Math.max(totalBytesToUpload, 0L);
+        long bytesDone = Math.max(completedBytes + (inFlight > 0 ? currentUploadBytes : 0L), 0L);
+        double progress = bytesTotal > 0 ? Math.min(1.0, (double) bytesDone / (double) bytesTotal) : (total > 0 ? (double) completed / (double) total : 0.0);
         boolean completedSync = isSyncCompleted();
+        long now = System.currentTimeMillis();
+        long elapsedMs = currentUploadStartedAt > 0 ? Math.max(1L, now - currentUploadStartedAt) : 0L;
+        long bytesPerSec = (elapsedMs > 0 && inFlight > 0) ? Math.max(1L, (currentUploadBytes * 1000L) / elapsedMs) : 0L;
+        long idleSinceMs = lastCompletedAt > 0 ? Math.max(0L, now - lastCompletedAt) : 0L;
 
-        Runnable update = () -> {
-            String scanState = scanning ? "Escaneando..." : "Listo";
-            String pauseState = paused ? "Pausada" : "Activa";
-            String syncState = completedSync ? "Completada" : "En proceso";
-            uploadStats.setText(scanState + " | Sync: " + syncState + " | Cola: " + pauseState + " | Archivos: " + completed + "/" + total + " | En vuelo: " + inFlight + " | Pendientes: " + pending + " | Fallidos: " + failed);
-            uploadProgressBar.setProgress(progress);
-            completionLabel.setText("Estado: " + syncState);
-            updateFolderControls();
-        };
-
-        if (Platform.isFxApplicationThread()) {
-            update.run();
-        } else {
-            Platform.runLater(update);
-        }
+        String pauseState = paused ? "Pausada" : "Activa";
+        String syncState = completedSync ? "Completada" : "En proceso";
+        String byteSummary = formatBytes(bytesDone) + " / " + formatBytes(bytesTotal);
+        String speed = bytesPerSec > 0 ? formatBytes(bytesPerSec) + "/s" : "Calculando...";
+        String activityHint = completed == 0 && inFlight > 0 ? "Primer archivo en transferencia" : (completed > 0 ? "Última confirmación hace " + formatDuration(idleSinceMs) : "Preparando subidas");
+        uploadStats.setText("Escaneo: " + (scanning ? "activo" : "listo") + " | Cola: " + pauseState + " | Archivos " + completed + "/" + total + " | Detectados: " + scanned + " | Fallidos: " + failed);
+        syncMessage.setText("Subiendo: " + completed + "/" + total + " | Bytes: " + byteSummary + " | Velocidad: " + speed + " | " + activityHint);
+        uploadProgressBar.setProgress((scanning || (inFlight > 0 && completed == 0)) ? ProgressBar.INDETERMINATE_PROGRESS : progress);
+        completionLabel.setText("Estado: " + syncState);
+        lastUploadLabel.setText("Última subida exitosa: " + lastSuccessfulUpload);
+        updateFolderControls();
     }
 
     private void handleDelete(Path rootFolder, Path path) {
@@ -633,6 +788,38 @@ public class DashboardView {
         int inFlight = activeUploads.get();
         int pending = Math.max(totalFilesToUpload - completedFiles - failedFiles - inFlight, 0);
         return !scanning && !paused && pending == 0 && inFlight == 0 && failedUploads.isEmpty();
+    }
+
+    private long safeFileSize(Path path) {
+        try {
+            return Files.size(path);
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        }
+        double value = bytes;
+        String[] units = {"KB", "MB", "GB", "TB"};
+        int unit = -1;
+        while (value >= 1024 && unit < units.length - 1) {
+            value /= 1024;
+            unit++;
+        }
+        return String.format("%.1f %s", value, units[Math.max(unit, 0)]);
+    }
+
+    private String formatDuration(long ms) {
+        long totalSeconds = Math.max(ms, 0L) / 1000L;
+        long minutes = totalSeconds / 60L;
+        long seconds = totalSeconds % 60L;
+        if (minutes > 0) {
+            return String.format("%dm %02ds", minutes, seconds);
+        }
+        return String.format("%ds", seconds);
     }
 
     private void updateFolderControls() {
@@ -658,6 +845,7 @@ public class DashboardView {
         try {
             var root = new java.util.LinkedHashMap<String, Object>();
             root.put("syncFolder", state.getSyncFolder());
+            root.put("remoteRootFolderId", remoteRootFolderId);
             root.put("paused", paused);
             root.put("scanning", scanning);
             root.put("failedUploads", new java.util.ArrayList<>(failedUploads));
@@ -677,6 +865,10 @@ public class DashboardView {
             if (!folder.toAbsolutePath().toString().equals(node.path("syncFolder").asText(""))) {
                 return;
             }
+            String savedRemoteRootFolderId = node.path("remoteRootFolderId").asText("");
+            if (!savedRemoteRootFolderId.isBlank()) {
+                remoteRootFolderId = savedRemoteRootFolderId;
+            }
             paused = node.path("paused").asBoolean(false);
             Platform.runLater(() -> pauseResumeButton.setText(paused ? "Reanudar cola" : "Pausar cola"));
             node.path("uploadedSignatures").fields().forEachRemaining(entry -> uploadedSignatures.put(entry.getKey(), entry.getValue().asText("")));
@@ -688,30 +880,53 @@ public class DashboardView {
     }
 
     private void connectSocket() {
-        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-        String wsUrl = state.getServerUrl().replaceFirst("^http", "ws").replaceAll("/$", "") + "/ws/sync";
-        webSocket = HttpClient.newHttpClient()
-                .newWebSocketBuilder()
-                .buildAsync(URI.create(wsUrl), new WebSocket.Listener() {
-                    @Override
-                    public void onOpen(WebSocket webSocket) {
-                        WebSocket.Listener.super.onOpen(webSocket);
-                        Platform.runLater(() -> syncStatus.setText("Conectado"));
-                    }
+        try {
+            HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+            String wsUrl = state.getServerUrl().replaceFirst("^http", "ws").replaceAll("/$", "") + "/ws/sync";
+            HttpClient.newHttpClient()
+                    .newWebSocketBuilder()
+                    .buildAsync(URI.create(wsUrl), new WebSocket.Listener() {
+                        @Override
+                        public void onOpen(WebSocket webSocket) {
+                            WebSocket.Listener.super.onOpen(webSocket);
+                            Platform.runLater(() -> syncStatus.setText("Conectado"));
+                        }
 
-                    @Override
-                    public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
-                        Platform.runLater(() -> handleSocketMessage(data.toString()));
-                        webSocket.request(1);
-                        return WebSocket.Listener.super.onText(webSocket, data, last);
-                    }
+                        @Override
+                        public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
+                            Platform.runLater(() -> handleSocketMessage(data.toString()));
+                            webSocket.request(1);
+                            return WebSocket.Listener.super.onText(webSocket, data, last);
+                        }
 
-                    @Override
-                    public void onError(WebSocket webSocket, Throwable error) {
-                        Platform.runLater(() -> syncStatus.setText("Socket con error: " + error.getMessage()));
-                    }
-                }).join();
-        webSocket.request(1);
+                        @Override
+                        public void onError(WebSocket webSocket, Throwable error) {
+                            Platform.runLater(() -> syncStatus.setText("Socket con error: " + error.getMessage()));
+                        }
+                    })
+                    .thenAccept(ws -> {
+                        webSocket = ws;
+                        ws.request(1);
+                    })
+                    .exceptionally(ex -> {
+                        Platform.runLater(() -> syncStatus.setText("Socket con error: " + ex.getMessage()));
+                        return null;
+                    });
+        } catch (Exception e) {
+            Platform.runLater(() -> syncStatus.setText("Socket con error: " + e.getMessage()));
+        }
+    }
+
+    private static class RefreshSnapshot {
+        private final JsonNode status;
+        private final JsonNode content;
+        private final String errorMessage;
+
+        private RefreshSnapshot(JsonNode status, JsonNode content, String errorMessage) {
+            this.status = status;
+            this.content = content;
+            this.errorMessage = errorMessage;
+        }
     }
 
     private void handleSocketMessage(String raw) {
@@ -737,3 +952,4 @@ public class DashboardView {
         }
     }
 }
+
