@@ -10,6 +10,11 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.io.InputStream;
+import java.io.ByteArrayInputStream;
+import java.io.SequenceInputStream;
+import java.util.Vector;
+import java.util.function.LongConsumer;
 
 public class ApiClient {
     private final HttpClient httpClient = HttpClient.newHttpClient();
@@ -83,17 +88,21 @@ public class ApiClient {
     }
 
     public JsonNode uploadFile(String serverUrl, String token, Path filePath, String relativePath, String folderId) throws Exception {
+        return uploadFile(serverUrl, token, filePath, relativePath, folderId, null);
+    }
+
+    public JsonNode uploadFile(String serverUrl, String token, Path filePath, String relativePath, String folderId, LongConsumer progressListener) throws Exception {
         String boundary = "----TyrakBoundary" + System.currentTimeMillis();
         byte[] fileBytes = Files.readAllBytes(filePath);
         String sanitizedName = relativePath.replace("\\", "/");
 
-        byte[] body = buildMultipartBody(boundary, sanitizedName, fileBytes, folderId);
+        MultipartBody multipartBody = buildMultipartBody(boundary, sanitizedName, fileBytes, folderId, progressListener);
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(serverUrl.replaceAll("/$", "") + "/api/files/upload"))
                 .header("Authorization", "Bearer " + token)
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .POST(HttpRequest.BodyPublishers.ofInputStream(multipartBody::openStream))
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -150,7 +159,7 @@ public class ApiClient {
         }
     }
 
-    private byte[] buildMultipartBody(String boundary, String relativePath, byte[] fileBytes, String folderId) throws Exception {
+    private MultipartBody buildMultipartBody(String boundary, String relativePath, byte[] fileBytes, String folderId, LongConsumer progressListener) throws Exception {
         String partHeader =
                 "--" + boundary + "\r\n" +
                 "Content-Disposition: form-data; name=\"file\"; filename=\"" + relativePath.substring(relativePath.lastIndexOf('/') + 1).replace("\"", "%22") + "\"\r\n" +
@@ -172,13 +181,80 @@ public class ApiClient {
         byte[] pathBytes = pathPart.getBytes(StandardCharsets.UTF_8);
         byte[] folderBytes = folderPart.getBytes(StandardCharsets.UTF_8);
         byte[] footerBytes = partFooter.getBytes(StandardCharsets.UTF_8);
-        byte[] body = new byte[headerBytes.length + fileBytes.length + pathBytes.length + folderBytes.length + footerBytes.length];
-        System.arraycopy(headerBytes, 0, body, 0, headerBytes.length);
-        System.arraycopy(fileBytes, 0, body, headerBytes.length, fileBytes.length);
-        System.arraycopy(pathBytes, 0, body, headerBytes.length + fileBytes.length, pathBytes.length);
-        System.arraycopy(folderBytes, 0, body, headerBytes.length + fileBytes.length + pathBytes.length, folderBytes.length);
-        System.arraycopy(footerBytes, 0, body, headerBytes.length + fileBytes.length + pathBytes.length + folderBytes.length, footerBytes.length);
-        return body;
+        return new MultipartBody(headerBytes, fileBytes, pathBytes, folderBytes, footerBytes, progressListener);
+    }
+
+    private static class MultipartBody {
+        private final byte[][] parts;
+        private final long totalBytes;
+        private final LongConsumer progressListener;
+
+        private MultipartBody(byte[] headerBytes, byte[] fileBytes, byte[] pathBytes, byte[] folderBytes, byte[] footerBytes, LongConsumer progressListener) {
+            this.parts = new byte[][]{headerBytes, fileBytes, pathBytes, folderBytes, footerBytes};
+            long total = 0L;
+            for (byte[] part : parts) {
+                total += part.length;
+            }
+            this.totalBytes = total;
+            this.progressListener = progressListener;
+        }
+
+        private InputStream openStream() {
+            Vector<InputStream> streams = new Vector<>();
+            for (byte[] part : parts) {
+                streams.add(new ByteArrayInputStream(part));
+            }
+            SequenceInputStream sequence = new SequenceInputStream(streams.elements());
+            if (progressListener == null) {
+                return sequence;
+            }
+            return new ProgressInputStream(sequence, totalBytes, progressListener);
+        }
+    }
+
+    private static class ProgressInputStream extends InputStream {
+        private final InputStream delegate;
+        private final long totalBytes;
+        private final LongConsumer progressListener;
+        private long transferred = 0L;
+
+        private ProgressInputStream(InputStream delegate, long totalBytes, LongConsumer progressListener) {
+            this.delegate = delegate;
+            this.totalBytes = totalBytes;
+            this.progressListener = progressListener;
+        }
+
+        @Override
+        public int read() throws java.io.IOException {
+            int value = delegate.read();
+            if (value != -1) {
+                report(1L);
+            } else {
+                report(totalBytes);
+            }
+            return value;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws java.io.IOException {
+            int read = delegate.read(b, off, len);
+            if (read > 0) {
+                report(read);
+            } else if (read == -1) {
+                report(totalBytes);
+            }
+            return read;
+        }
+
+        @Override
+        public void close() throws java.io.IOException {
+            delegate.close();
+        }
+
+        private void report(long delta) {
+            transferred += delta;
+            progressListener.accept(Math.min(transferred, totalBytes));
+        }
     }
 
     public static class AuthResult {

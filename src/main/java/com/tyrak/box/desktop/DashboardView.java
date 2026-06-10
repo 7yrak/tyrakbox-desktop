@@ -68,6 +68,7 @@ public class DashboardView {
     private final Set<String> failedUploads = ConcurrentHashMap.newKeySet();
     private final Map<String, String> remoteFolderIds = new ConcurrentHashMap<>();
     private final Set<String> remoteFilePaths = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> remoteFileSizes = new ConcurrentHashMap<>();
     private final ExecutorService bootstrapExecutor = Executors.newSingleThreadExecutor();
     private volatile String remoteRootFolderId;
     private volatile int totalFilesToUpload = 0;
@@ -76,7 +77,9 @@ public class DashboardView {
     private volatile int failedFiles = 0;
     private volatile long totalBytesToUpload = 0L;
     private volatile long completedBytes = 0L;
+    private volatile long remoteExistingBytes = 0L;
     private volatile long currentUploadBytes = 0L;
+    private volatile long currentUploadSentBytes = 0L;
     private volatile long currentUploadStartedAt = 0L;
     private volatile String lastSuccessfulUpload = "-";
     private volatile long syncStartedAt = 0L;
@@ -456,6 +459,8 @@ public class DashboardView {
     private void ensureRemoteFolderTree(Path rootFolder) throws Exception {
         remoteFolderIds.clear();
         remoteFilePaths.clear();
+        remoteFileSizes.clear();
+        remoteExistingBytes = 0L;
         java.io.File fileName = rootFolder.toFile();
         String rootName = fileName.getName();
         String existingRootId = remoteRootFolderId;
@@ -505,7 +510,11 @@ public class DashboardView {
             content.get("files").forEach(file -> {
                 String name = file.path("name").asText("");
                 if (!name.isBlank()) {
-                    remoteFilePaths.add((prefix + name).replace("\\", "/"));
+                    String relative = (prefix + name).replace("\\", "/");
+                    remoteFilePaths.add(relative);
+                    long sizeBytes = file.path("sizeBytes").asLong(0L);
+                    remoteFileSizes.put(relative, sizeBytes);
+                    remoteExistingBytes += sizeBytes;
                 }
             });
         }
@@ -567,10 +576,12 @@ public class DashboardView {
         }
 
         String relative = rootFolder.relativize(path).toString().replace("\\", "/");
+        long fileSize = safeFileSize(path);
         String signature = fileSignature(path);
         String previousSignature = uploadedSignatures.get(relative);
-        boolean remoteHasFile = remoteFilePaths.contains(relative);
-        if ((remoteHasFile || signature.equals(previousSignature)) && !failedUploads.contains(relative)) {
+        Long remoteSize = remoteFileSizes.get(relative);
+        boolean remoteMatches = remoteSize != null && remoteSize.longValue() == fileSize;
+        if ((remoteMatches || signature.equals(previousSignature)) && !failedUploads.contains(relative)) {
             uploadResults.put(relative, Boolean.TRUE);
             uploadedSignatures.put(relative, signature);
             completedFiles = (int) uploadResults.values().stream().filter(Boolean::booleanValue).count();
@@ -615,6 +626,7 @@ public class DashboardView {
             activeUploads.incrementAndGet();
             long fileSize = safeFileSize(path);
             currentUploadBytes = fileSize;
+            currentUploadSentBytes = 0L;
             currentUploadStartedAt = System.currentTimeMillis();
             if (syncStartedAt == 0L) {
                 syncStartedAt = System.currentTimeMillis();
@@ -626,7 +638,11 @@ public class DashboardView {
                 currentUploadLabel.setText("Archivo actual: " + relative);
                 syncMessage.setText("Subiendo: " + relative);
             });
-            apiClient.uploadFile(state.getServerUrl(), state.getToken(), path, relative, remoteRootFolderId);
+            apiClient.uploadFile(state.getServerUrl(), state.getToken(), path, relative, remoteRootFolderId, sent -> {
+                currentUploadSentBytes = sent;
+                updateUploadStats();
+            });
+            currentUploadSentBytes = fileSize;
             uploadResults.put(rootFolder.relativize(path).toString().replace("\\", "/"), Boolean.TRUE);
             uploadAttempts.remove(rootFolder.relativize(path).toString().replace("\\", "/"));
             uploadedSignatures.put(rootFolder.relativize(path).toString().replace("\\", "/"), fileSignature(path));
@@ -662,6 +678,7 @@ public class DashboardView {
             }
             activeUploads.updateAndGet(v -> Math.max(0, v - 1));
             currentUploadBytes = 0L;
+            currentUploadSentBytes = 0L;
             currentUploadStartedAt = 0L;
             Platform.runLater(() -> currentUploadLabel.setText("Archivo actual: -"));
             updateUploadStats();
@@ -725,7 +742,9 @@ public class DashboardView {
         failedFiles = 0;
         totalBytesToUpload = 0L;
         completedBytes = 0L;
+        remoteExistingBytes = 0L;
         currentUploadBytes = 0L;
+        currentUploadSentBytes = 0L;
         currentUploadStartedAt = 0L;
         lastSuccessfulUpload = "-";
         syncStartedAt = System.currentTimeMillis();
@@ -758,12 +777,12 @@ public class DashboardView {
         int failed = failedFiles;
         int inFlight = activeUploads.get();
         long bytesTotal = Math.max(totalBytesToUpload, 0L);
-        long bytesDone = Math.max(completedBytes + (inFlight > 0 ? currentUploadBytes : 0L), 0L);
+        long bytesDone = Math.max(completedBytes + (inFlight > 0 ? currentUploadSentBytes : 0L), 0L);
         double progress = bytesTotal > 0 ? Math.min(1.0, (double) bytesDone / (double) bytesTotal) : (total > 0 ? (double) completed / (double) total : 0.0);
         boolean completedSync = isSyncCompleted();
         long now = System.currentTimeMillis();
         long elapsedMs = currentUploadStartedAt > 0 ? Math.max(1L, now - currentUploadStartedAt) : 0L;
-        long bytesPerSec = (elapsedMs > 0 && inFlight > 0) ? Math.max(1L, (currentUploadBytes * 1000L) / elapsedMs) : 0L;
+        long bytesPerSec = (elapsedMs > 0 && inFlight > 0) ? Math.max(1L, (currentUploadSentBytes * 1000L) / elapsedMs) : 0L;
         long idleSinceMs = lastCompletedAt > 0 ? Math.max(0L, now - lastCompletedAt) : 0L;
 
         String pauseState = paused ? "Pausada" : "Activa";
@@ -772,8 +791,8 @@ public class DashboardView {
         String speed = bytesPerSec > 0 ? formatBytes(bytesPerSec) + "/s" : "Calculando...";
         String activityHint = completed == 0 && inFlight > 0 ? "Primer archivo en transferencia" : (completed > 0 ? "Última confirmación hace " + formatDuration(idleSinceMs) : "Preparando subidas");
         uploadStats.setText("Escaneo: " + (scanning ? "activo" : "listo") + " | Cola: " + pauseState + " | Archivos " + completed + "/" + total + " | Detectados: " + scanned + " | Fallidos: " + failed);
-        syncMessage.setText("Subiendo: " + completed + "/" + total + " | Bytes: " + byteSummary + " | Velocidad: " + speed + " | " + activityHint);
-        uploadProgressBar.setProgress((scanning || (inFlight > 0 && completed == 0)) ? ProgressBar.INDETERMINATE_PROGRESS : progress);
+        syncMessage.setText("Servidor: " + formatBytes(remoteExistingBytes) + " | Subiendo: " + formatBytes(completedBytes + (inFlight > 0 ? currentUploadSentBytes : 0L)) + " | Total: " + formatBytes(bytesTotal) + " | Restante: " + formatBytes(Math.max(bytesTotal - bytesDone, 0L)) + " | Velocidad: " + speed + " | " + activityHint);
+        uploadProgressBar.setProgress(progress);
         completionLabel.setText("Estado: " + syncState);
         lastUploadLabel.setText("Última subida exitosa: " + lastSuccessfulUpload);
         updateFolderControls();
