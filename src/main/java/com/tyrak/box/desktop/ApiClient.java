@@ -56,6 +56,19 @@ public class ApiClient {
         return mapper.readTree(response.body());
     }
 
+    public JsonNode getCurrentUser(String serverUrl, String token) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(serverUrl.replaceAll("/$", "") + "/api/auth/me"))
+                .header("Authorization", "Bearer " + token)
+                .GET()
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() / 100 != 2) {
+            throw new IllegalStateException(response.body());
+        }
+        return mapper.readTree(response.body());
+    }
+
     public JsonNode getRootContent(String serverUrl, String token) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(serverUrl.replaceAll("/$", "") + "/api/folders/content"))

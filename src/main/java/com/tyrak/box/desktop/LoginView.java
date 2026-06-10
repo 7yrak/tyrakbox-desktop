@@ -12,9 +12,11 @@ public class LoginView {
     private final AppState state;
     private final ApiClient apiClient = new ApiClient();
     private final VBox root = new VBox(12);
+    private final Runnable onAuthenticated;
 
-    public LoginView(AppState state) {
+    public LoginView(AppState state, Runnable onAuthenticated) {
         this.state = state;
+        this.onAuthenticated = onAuthenticated;
         build();
     }
 
@@ -71,6 +73,7 @@ public class LoginView {
                     state.setToken(result.token);
                     state.setUsername(result.username);
                     state.setUserId(result.userId);
+                    SessionStore.save(state.getServerUrl(), result.token, result.username, result.userId);
                     if (DashboardView.hasSavedSession()) {
                         Alert prompt = new Alert(Alert.AlertType.CONFIRMATION);
                         prompt.setTitle("Sesión guardada");
@@ -92,9 +95,9 @@ public class LoginView {
                             state.setResumeToken(null);
                         }
                     }
-
-                    DashboardView dashboard = new DashboardView(state);
-                    root.getScene().setRoot(dashboard.getRoot());
+                    if (onAuthenticated != null) {
+                        onAuthenticated.run();
+                    }
                 } finally {
                     login.setDisable(false);
                 }

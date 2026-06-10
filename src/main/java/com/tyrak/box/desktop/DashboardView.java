@@ -53,6 +53,7 @@ public class DashboardView {
     private final Button closeFolderButton = new Button("Cerrar sesión de carpeta");
     private final Button pauseResumeButton = new Button("Pausar cola");
     private final Button retryFailedButton = new Button("Reintentar fallidos");
+    private final Button logoutButton = new Button("Cerrar sesión");
     private WebSocket webSocket;
     private WatchService watchService;
     // El escaneo inicial y el watcher deben poder correr en paralelo.
@@ -88,9 +89,11 @@ public class DashboardView {
     private volatile boolean paused = false;
     private final AtomicBoolean uploadStatsUpdateQueued = new AtomicBoolean(false);
     private static final int MAX_UPLOAD_ATTEMPTS = 3;
+    private final Runnable onLogout;
 
-    public DashboardView(AppState state) {
+    public DashboardView(AppState state, Runnable onLogout) {
         this.state = state;
+        this.onLogout = onLogout;
         build();
         bootstrapExecutor.submit(this::initializeAsync);
     }
@@ -164,6 +167,8 @@ public class DashboardView {
         pauseResumeButton.setOnAction(e -> togglePause());
         retryFailedButton.getStyleClass().add("secondary-button");
         retryFailedButton.setOnAction(e -> retryFailedUploads());
+        logoutButton.getStyleClass().add("secondary-button");
+        logoutButton.setOnAction(e -> logout());
         folderLabel.setWrapText(true);
         completionLabel.getStyleClass().add("sync-message");
         uploadProgressBar.setPrefWidth(520);
@@ -188,6 +193,7 @@ public class DashboardView {
                 closeFolderButton,
                 pauseResumeButton,
                 retryFailedButton,
+                logoutButton,
                 completionLabel,
                 folderLabel
         );
@@ -308,6 +314,19 @@ public class DashboardView {
             uploadProgressBar.setProgress(0);
             currentUploadLabel.setText("Archivo actual: -");
         });
+    }
+
+    private void logout() {
+        stopFolderSync(true);
+        SessionStore.clear();
+        state.setToken(null);
+        state.setUsername(null);
+        state.setUserId(null);
+        state.setSyncFolder(null);
+        state.setResumeToken(null);
+        if (onLogout != null) {
+            onLogout.run();
+        }
     }
 
     private void startFolderSync(Path folder) {
@@ -777,7 +796,7 @@ public class DashboardView {
         int failed = failedFiles;
         int inFlight = activeUploads.get();
         long bytesTotal = Math.max(totalBytesToUpload, 0L);
-        long bytesDone = Math.max(completedBytes + (inFlight > 0 ? currentUploadSentBytes : 0L), 0L);
+        long bytesDone = Math.max(remoteExistingBytes + completedBytes + (inFlight > 0 ? currentUploadSentBytes : 0L), 0L);
         double progress = bytesTotal > 0 ? Math.min(1.0, (double) bytesDone / (double) bytesTotal) : (total > 0 ? (double) completed / (double) total : 0.0);
         boolean completedSync = isSyncCompleted();
         long now = System.currentTimeMillis();
